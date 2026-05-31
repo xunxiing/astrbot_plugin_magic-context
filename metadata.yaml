@@ -1,0 +1,7 @@
+name: astrbot_plugin_magic_context
+display_name: Magic Context
+desc: Context compression plugin for AstrBot — mimics OpenCode magic-context with tagging, heuristic cleanup, caveman compression, and Historian Agent summarization.
+version: v0.1.0
+author: magic-context
+repo: https://github.com/cortexkit/magic-context
+astrbot_version: ">=4.16,<5"

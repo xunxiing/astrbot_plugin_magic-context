@@ -1,0 +1,132 @@
+# Magic Context → AstrBot Port — Gap Review v2
+
+## Architecture Decisions (from AstrBot analysis)
+
+These decisions eliminate entire TS source files from porting scope:
+
+| Decision | TS files skipped | Reason |
+|----------|-----------------|--------|
+| `@filter.on_agent_begin()` exposes per-part `ContentPart` + `tool_call_id` | `tag-part-guards.ts`, `apply-operations.ts`, `tool-drop-target.ts` | AstrBot's message model is `list[ContentPart]` natively; no need for §N§ prefix parsing or composite `ownerMsgId\x00callId` keys |
+| `tool_call_id` is globally unique in AstrBot | `tool-index.ts`, FIFO owner pairing | No need for composite-key tag index or legacy NULL-owner adoption |
+| Messages flow to LLM providers → §N§ tags in message content would leak | `tag-messages.ts` §N§ prefix injection | Tags stored in DB only, matched by `message_id`/`tool_call_id` |
+| `TextPart.mark_as_temp()` for transient content | `system-injection-stripper.ts` injection detection | AstrBot has native temp content API |
+| Phase 7 (memory) skipped per user directive | All `ctx_memory`/embedding/FTS5/notes tables and modules | Other AstrBot plugins provide long-term memory |
+| No OpenCode dashboard integration | `compartment-runner-state-file.ts`, dreamer subagent | AstrBot has no equivalent dreamer/scheduler infrastructure |
+
+## Corrected Scope: What Actually Needs Porting
+
+### Module: storage (`storage-db.ts`, `storage-tags.ts`, `storage-ops.ts`, `compartment-storage.ts`)
+
+**Skip**: `storage-source.ts`, `storage-notes.ts`, `storage-meta-shared.ts`, `storage-meta-persisted.ts`, `storage-meta-session.ts`, `compression-depth-storage.ts`, `message-index.ts`, `memory-*.ts`, `dream-*.ts`, `project-key-*.ts`
+
+**Keep**: 
+- [x] Core CRUD: assign_tag, get_active_tags, get_tags_by_session, get_max_tag_number, update_tag_status, update_tag_drop_mode, update_tag_byte_size, update_tag_message_id, update_caveman_depth, delete_tags_by_message_id, clear_session_tags
+- [x] Pending ops: queue_pending_op, get_pending_ops, clear_pending_ops
+- [x] Compartments: save_compartments, get_compartments, append_compartments, get_last_compartment_end_message
+- [x] Session facts: replace_session_facts, get_session_facts
+- [x] Session meta (core): get_or_create_session_meta, update_session_meta
+
+**Still missing from keep-list**:
+- [ ] `get_tag_number_by_message_id` — needed for recovery/resume
+- [ ] `get_tag_by_id` — needed for single-tag lookup during drop confirmation
+- [ ] `update_tag_input_byte_size` — needed for tool-call size tracking via tc.id
+- [ ] `removePendingOp` — needed for selective op retraction after cancel
+
+### Module: caveman (`caveman.ts`, `caveman-cleanup.ts`)
+
+**Skip**: Nothing significant — caveman is deterministic text compression, fully AstrBot-agnostic.
+
+**Keep**: 
+- [x] protect_regions, restore_regions, caveman_compress (lite/full/ultra)
+- [x] caveman_level_for_depth, compute_target_depth
+- [x] apply_caveman_cleanup, replay_caveman_compression
+
+**Still missing**:
+- [ ] `get_source_contents` batch — caveman currently compresses from `target.get_content()` which may already be compressed; original needs per-tag pristine-origin fetch from a `source_contents` table (or we store original text in the tags row itself as an `original_text` extra column)
+- [ ] Caveman depth NOT persisted to DB after `apply_caveman_cleanup` — needs `update_caveman_depth` call per compressed tag
+- [ ] `replay_caveman_compression` lacks session_id/db params — cannot re-apply persisted depths on restart
+
+### Module: strip (`strip-content.ts`)
+
+**Skip**: `strip-system-injected-messages` (AstrBot has `TextPart.mark_as_temp()`), `strip-dropped-placeholder-messages` (placesholders are AstrBot-specific not DB-encoded), `strip-processed-images` (AstrBot image model differs)
+
+**Keep**:
+- [x] strip_thinking_tags, strip_inline_thinking
+- [x] strip_cleared_reasoning, clear_old_reasoning
+
+**Still missing**:
+- [ ] `replay_cleared_reasoning` — missing `persisted_watermark` gate; strips ALL messages unconditionally instead of watermark-gated
+- [ ] `replay_stripped_inline_thinking` — same watermark-gate problem
+- [ ] `truncate_errored_tools` — missing watermark parameter; processes ALL tools unconditionally
+
+### Module: historian (`compartment-runner-*.ts`, `compartment-prompt.ts`, `compartment-parser.ts`, `read-session-chunk.ts`)
+
+**Skip**: `compartment-runner-compressor.ts` (entire LLM-based re-compression pass — deferred to later phase), `compartment-runner-drop-queue.ts` (drop queueing tied to OpenCode message mutation model)
+
+**Keep**:
+- [x] COMPARTMENT_AGENT_SYSTEM_PROMPT, HISTORIAN_EDITOR_SYSTEM_PROMPT
+- [x] build_historian_editor_prompt
+- [x] parse_compartment_output (XML parsing)
+- [x] build_existing_state_xml
+- [x] Basic 9-step pipeline skeleton (validate → offset → state XML → format → LLM → parse → store)
+
+**Still missing (keep-list)**:
+- [ ] `run_validated_historian_pass` — retry loop (MAX_HISTORIAN_RETRIES=2 with exponential backoff)
+- [ ] `build_historian_repair_prompt` + repair retry path
+- [ ] `run_fallback_historian_pass` — fallback model retry
+- [ ] `validate_historian_output` — structured validation (gap healing, coverage check)
+- [ ] `validate_chunk_coverage` — chunk ordinal coverage validation
+- [ ] `is_transient_historian_prompt_error` — retry classification
+- [ ] `get_protected_tail_start` — hasMeaningfulUserText filtering (counts only meaningful user turns, skips pure notifications)
+- [ ] `read_session_chunk` — token-budgeted chunking with block-merging and tool-only range tracking
+- [ ] `map_parsed_compartments_to_chunk` — chunk-line ordinal → messageId resolution
+- [ ] `queue_drops_for_compartmentalized_messages` — tag-based drop queueing (skipped per decision, but need equivalent using AstrBot's tool_call_id instead of composite keys)
+- [ ] `promote_session_facts_to_memory` — skipped (Phase 7)
+
+### Module: orchestration (`transform.ts`, `transform-postprocess-phase.ts`)
+
+**Skip**: `create_transform` scheduler logic (AstrBot's hook system provides execution timing via filter priorities; no need for context-usage-based defer/execute decisions), `clear_message_tokens_cache`, `create_nudge_placement_store`, `run_post_transform_phase` (1006 lines — most subcomponents are OpenCode-specific: nudge injection, todo synthesis, auto-search hint, deferred marker drain, emergency bypass)
+
+**Keep**:
+- [x] Linear 6-phase pipeline via AstrBot hooks (on_agent_begin ×3, on_llm_request ×2, on_llm_response + after_message_sent)
+
+**Still missing from keep-list**:
+- [ ] Postprocess: pending-op materialization gating (decide whether to materialize queued drops now or defer)
+- [ ] Postprocess: sentinel replay/persistence (re-apply droppped/truncated statuses from DB into active messages)
+
+## Revised Gap Count (scope-corrected)
+
+| Module | Original TS exports | In scope | Ported | Missing (in scope) | Coverage |
+|--------|-------------------|----------|--------|---------------------|----------|
+| storage | ~80 | ~25 | 22 | 3 | ~88% |
+| caveman | ~10 | 10 | 7 | 3 | ~70% |
+| strip | ~22 | 8 | 5 | 3 | ~63% |
+| historian | ~43 | 16 | 9 | 7 | ~56% |
+| orchestration | ~42 | 6 | 4 | 2 | ~67% |
+| **TOTAL** | **~197** | **~65** | **~47** | **~18** | **~72%** |
+
+## Priority Ranking for Remaining 18 Gaps
+
+### P0 (blocks correct operation) — FIXED:
+1. ~~`update_caveman_depth` not persisted~~ → **FIXED**: `apply_caveman_cleanup` now batches all depth updates in a single transaction via `db.update_caveman_depths()`
+2. ~~`replay_caveman_compression` → cannot re-apply depths on restart~~ → **FIXED**: `replay_caveman_compression` now loads pristine originals from DB via `db.get_source_contents()`
+3. ~~Caveman compresses from already-compressed text → non-idempotent~~ → **FIXED**: Both `apply_caveman_cleanup` and `replay_caveman_compression` now compress from pristine originals stored in DB, not from `target.get_content()`
+4. `replay_cleared_reasoning` watermark gate → strips ALL reasoning every turn — PENDING
+5. `replay_stripped_inline_thinking` watermark gate → same — PENDING
+
+### P1 (error resilience):
+6. `run_validated_historian_pass` retry loop
+7. `build_historian_repair_prompt` + repair path
+8. `run_fallback_historian_pass` — fallback model
+9. `is_transient_historian_prompt_error` — retry classification
+10. `validate_historian_output` — structured validation
+11. `validate_chunk_coverage` — coverage validation
+
+### P2 (quality):
+12. `read_session_chunk` token-budgeted chunking
+13. `get_protected_tail_start` meaningful-user-turn filtering
+14. `map_parsed_compartments_to_chunk` chunk-line resolution
+15. `get_tag_number_by_message_id` + `get_tag_by_id` + `removePendingOp` (storage gaps)
+16. Caveman pristine-origin fetch (source_contents or original_text column)
+17. Postprocess: pending-op materialization gating
+18. Postprocess: sentinel replay/persistence

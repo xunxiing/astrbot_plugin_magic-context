@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Magic Context</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="page">
+      <section class="hero panel">
+        <div class="hero-copy">
+          <p class="eyebrow" id="eyebrow">Magic Context</p>
+          <h1 id="page-title">上下文压缩面板</h1>
+          <p class="hero-text" id="page-desc">
+            用漫画分镜看今天的压缩动作、上下文压力曲线和后台压缩策略。
+          </p>
+        </div>
+        <div class="hero-burst">
+          <span class="burst-label">啪</span>
+          <strong id="hero-count">0</strong>
+          <small id="hero-count-label">今日压缩次数</small>
+        </div>
+      </section>
+
+      <section class="kpis">
+        <article class="stat panel panel-yellow">
+          <span class="stat-tag">TOTAL</span>
+          <p class="stat-label">今日压缩上下文</p>
+          <strong class="stat-value" id="compacted-tokens">0</strong>
+          <p class="stat-foot">按输入 Token 估算</p>
+        </article>
+        <article class="stat panel panel-pink">
+          <span class="stat-tag">SAVE</span>
+          <p class="stat-label">今日减负 Token</p>
+          <strong class="stat-value" id="saved-tokens">0</strong>
+          <p class="stat-foot">Lite 为本地删 Tool，Hard 为摘要压缩</p>
+        </article>
+        <article class="stat panel panel-blue">
+          <span class="stat-tag">MODE</span>
+          <p class="stat-label">Lite / Hard</p>
+          <strong class="stat-value" id="mode-split">0 / 0</strong>
+          <p class="stat-foot">区分轻量清理和摘要压缩</p>
+        </article>
+        <article class="stat panel panel-mint">
+          <span class="stat-tag">PRESS</span>
+          <p class="stat-label">今日平均上下文占比</p>
+          <strong class="stat-value" id="avg-ratio">0%</strong>
+          <p class="stat-foot" id="active-sessions">活跃会话 0</p>
+        </article>
+      </section>
+
+      <section class="layout">
+        <article class="chart-card panel">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">咔</p>
+              <h2>Context 曲线</h2>
+            </div>
+            <button class="action-button" id="refresh-button" type="button">
+              刷新数据
+            </button>
+          </div>
+          <div class="chart-meta">
+            <span id="curve-summary">今天还没有样本</span>
+            <span id="latest-event">最近压缩：暂无</span>
+          </div>
+          <div class="chart-frame">
+            <svg id="curve-chart" viewBox="0 0 760 280" preserveAspectRatio="none">
+              <g id="chart-grid"></g>
+              <g id="chart-thresholds"></g>
+              <path id="chart-area" d=""></path>
+              <path id="chart-line" d=""></path>
+              <g id="chart-points"></g>
+            </svg>
+            <div class="chart-empty" id="chart-empty">还没有可绘制的上下文样本</div>
+          </div>
+          <div class="legend">
+            <span><i class="legend-dot legend-main"></i>上下文占比</span>
+            <span><i class="legend-dot legend-lite"></i>Lite 线 40%</span>
+            <span><i class="legend-dot legend-hard"></i>Fallback 线 85%</span>
+          </div>
+        </article>
+
+        <article class="config-card panel">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">速配</p>
+              <h2>快速配置</h2>
+            </div>
+            <span class="speech-chip">实时生效</span>
+          </div>
+          <form id="config-form" class="config-form">
+            <label class="toggle-row">
+              <span>
+                <strong>开启后台压缩</strong>
+                <small>仅对符合活跃条件的会话做空闲压缩</small>
+              </span>
+              <input id="idle_compaction_enabled" name="idle_compaction_enabled" type="checkbox" />
+            </label>
+
+            <label>
+              <span>静默触发分钟</span>
+              <input id="idle_compaction_after_minutes" name="idle_compaction_after_minutes" type="number" min="1" step="1" />
+            </label>
+            <label>
+              <span>最大后台空闲分钟</span>
+              <input id="idle_compaction_max_idle_minutes" name="idle_compaction_max_idle_minutes" type="number" min="1" step="1" />
+            </label>
+            <label>
+              <span>24 小时最低消息数</span>
+              <input id="active_session_min_messages_24h" name="active_session_min_messages_24h" type="number" min="1" step="1" />
+            </label>
+            <label>
+              <span>期望上下文 Token</span>
+              <input id="expected_context_tokens" name="expected_context_tokens" type="number" min="0" step="1" />
+            </label>
+            <label>
+              <span>Lite 阈值</span>
+              <input id="lite_compaction_ratio_threshold" name="lite_compaction_ratio_threshold" type="number" min="0.05" max="0.95" step="0.01" />
+            </label>
+            <label>
+              <span>保护尾部标签数</span>
+              <input id="protected_tags" name="protected_tags" type="number" min="0" step="1" />
+            </label>
+            <label>
+              <span>Tool 清理年龄</span>
+              <input id="auto_drop_tool_age" name="auto_drop_tool_age" type="number" min="0" step="1" />
+            </label>
+
+            <div class="config-actions">
+              <button class="save-button" type="submit">保存配置</button>
+              <span class="save-status" id="save-status">尚未保存</span>
+            </div>
+          </form>
+        </article>
+      </section>
+
+      <section class="notes">
+        <article class="note panel panel-white">
+          <span class="note-badge">Lite</span>
+          <h3>轻压缩</h3>
+          <p>这一版 Lite 不调用 LLM，只清理保护区之外、年龄足够老的 `tool_call` 和 `tool_result`。</p>
+        </article>
+        <article class="note panel panel-white">
+          <span class="note-badge">Hard</span>
+          <h3>重压缩</h3>
+          <p>Hard 仍然走 Historian 摘要压缩，用于上下文压力更高、值得付出压缩成本的场景。</p>
+        </article>
+        <article class="note panel panel-white">
+          <span class="note-badge">Cache</span>
+          <h3>缓存优先</h3>
+          <p>面板围绕“尽量不破坏缓存”设计：空闲窗口压缩、活跃会话筛选、配置页只改关键阈值。</p>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

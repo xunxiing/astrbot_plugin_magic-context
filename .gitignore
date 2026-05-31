@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AstrBot plugin specific
+.astrbot-plugin/
+.opencode/
+.review/
+.ruff_cache_local/
+__pycache__/
+
+# Data and logs
+data/
+*.db
+*.db-journal
+*.log
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OpenCode magic-context source (cloned reference)
+magic-context/
+
+*_secret*
+*.key
+.env
