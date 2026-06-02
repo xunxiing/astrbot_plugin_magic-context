@@ -177,7 +177,7 @@ class HeuristicCleanup:
                     to_remove.append(i)
                     continue
 
-        for idx in reversed(to_remove):
+        for idx in to_remove:
             del messages[idx]
 
         # Phase F: Apply pending ops and replay them immediately.
@@ -328,6 +328,9 @@ class HeuristicCleanup:
                 event, msg, idx, getattr(msg, "content", None)
             )
 
+            if role == "assistant":
+                dropped += self._apply_tool_call_drops(msg, source_id, dropped_tags)
+
             if role == "tool":
                 tool_call_id = getattr(msg, "tool_call_id", None)
                 if not tool_call_id:
@@ -366,9 +369,50 @@ class HeuristicCleanup:
 
         return {"dropped": dropped, "truncated": truncated}
 
+    def _apply_tool_call_drops(
+        self,
+        msg,
+        owner_id: str,
+        dropped_tags: list[dict],
+    ) -> int:
+        tool_calls = getattr(msg, "tool_calls", None)
+        if not isinstance(tool_calls, list) or not tool_calls:
+            return 0
+
+        remaining = []
+        removed = 0
+        for tc in tool_calls:
+            call_id = self._tool_call_id(tc)
+            matched = False
+            for tag in dropped_tags:
+                if tag.get("type") != "tool_call":
+                    continue
+                if tag.get("message_id") != call_id:
+                    continue
+                tag_owner = tag.get("tool_owner_message_id")
+                if tag_owner is not None and tag_owner != owner_id:
+                    continue
+                matched = True
+                break
+            if matched:
+                removed += 1
+                continue
+            remaining.append(tc)
+
+        if removed <= 0:
+            return 0
+
+        msg.tool_calls = remaining or None
+        content = getattr(msg, "content", None)
+        if msg.tool_calls is None and (
+            content is None or (isinstance(content, str) and not content.strip())
+        ):
+            msg.content = "[dropped]"
+        return removed
+
     def _drop_message_content(self, msg, tag: dict) -> bool:
         content = getattr(msg, "content", None)
-        placeholder = f"[dropped §{tag.get('tag_number')}§]"
+        placeholder = "[dropped]"
         if isinstance(content, str):
             if content == placeholder:
                 return False
@@ -390,7 +434,7 @@ class HeuristicCleanup:
     def _truncate_message_content(self, msg, tag: dict) -> bool:
         limit = int(self.config.get("truncated_tool_chars", 800))
         content = getattr(msg, "content", None)
-        prefix = f"[truncated §{tag.get('tag_number')}§] "
+        prefix = "[truncated] "
         if isinstance(content, str):
             if content.startswith(prefix):
                 return False

@@ -1,7 +1,7 @@
 import re
 from typing import Any
 
-DROPPED_PLACEHOLDER_PATTERN = re.compile(r"^\[dropped §\d+§\]$")
+DROPPED_PLACEHOLDER_PATTERN = re.compile(r"^\[dropped(?:\s+§\d+§)?\]$")
 TAG_PREFIX_PATTERN = re.compile(r"^§\d+§\s*")
 INLINE_THINKING_PATTERN = re.compile(
     r"<(?:thinking|think)>[\s\S]*?<\/(?:thinking|think)>\s*",
@@ -114,7 +114,7 @@ def _all_content_parts_are_dropped_placeholders(parts: list[dict[str, Any]]) -> 
             trimmed = part["text"].strip()
             if not trimmed:
                 continue
-            segments = re.split(r"(?=\[dropped §)", trimmed)
+            segments = re.split(r"(?=\[dropped)", trimmed)
             non_empty = [s for s in segments if s.strip()]
             if not all(
                 DROPPED_PLACEHOLDER_PATTERN.search(s.strip()) for s in non_empty
@@ -126,7 +126,7 @@ def _all_content_parts_are_dropped_placeholders(parts: list[dict[str, Any]]) -> 
             trimmed = part["text"].strip()
             if not trimmed:
                 continue
-            segments = re.split(r"(?=\[dropped §)", trimmed)
+            segments = re.split(r"(?=\[dropped)", trimmed)
             non_empty = [s for s in segments if s.strip()]
             if not all(
                 DROPPED_PLACEHOLDER_PATTERN.search(s.strip()) for s in non_empty
@@ -262,7 +262,7 @@ def strip_system_injected_messages(
 def strip_dropped_placeholder_messages(
     messages: list[dict[str, Any]],
 ) -> list[int]:
-    """Neutralize messages that consist entirely of [dropped §N§] placeholders.
+    """Neutralize messages that consist entirely of [dropped] placeholders.
 
     User-role messages are never neutralized (they anchor turn boundaries).
     Replaces matched messages' content with a single sentinel, preserving

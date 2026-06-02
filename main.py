@@ -15,7 +15,7 @@ from .hooks.heuristic_cleanup import HeuristicCleanup
 from .hooks.historian import HistorianAgent
 from .hooks.idle_compaction import IdleCompactionService
 from .hooks.injection import Injector
-from .hooks.llm_reduce_tool import queue_ctx_reduce
+from .hooks.llm_reduce_tool import CtxCompactTool, CtxReduceTool
 from .hooks.parallel_tool import ParallelToolUseTool
 from .hooks.postprocess import PostProcessor
 from .hooks.strip import strip_cleared_reasoning, strip_inline_thinking
@@ -136,12 +136,15 @@ class MagicContextPlugin(Star):
         self.historian = HistorianAgent(self.db, self.config)
         self.injector = Injector(self.db)
         self.postprocessor = PostProcessor(self.db)
+        self.ctx_reduce_tool = CtxReduceTool(plugin=self)
+        self.ctx_compact_tool = CtxCompactTool(plugin=self)
         self.parallel_tool = ParallelToolUseTool()
         self.tool_appeal_state_path = self.data_dir / "tool_appeal_state.json"
         self.idle_compaction = IdleCompactionService(
             self.db, self.historian, self.config, self.context
         )
         self._register_page_apis()
+        self.context.add_llm_tools(self.ctx_reduce_tool, self.ctx_compact_tool)
         self.context.add_llm_tools(self.parallel_tool)
 
     async def __start__(self):
@@ -153,6 +156,8 @@ class MagicContextPlugin(Star):
 
     async def __stop__(self):
         await self.idle_compaction.stop()
+        self.context.unregister_llm_tool(self.ctx_reduce_tool.name)
+        self.context.unregister_llm_tool(self.ctx_compact_tool.name)
         self.context.unregister_llm_tool(self.parallel_tool.name)
 
     def _register_page_apis(self) -> None:
@@ -232,7 +237,6 @@ class MagicContextPlugin(Star):
         tag_map: dict[str, int] = {}
         message_targets: dict[int, object] = {}
         msg_list = list(messages)
-        self._apply_visible_tag_prefixes(event, msg_list, all_tags)
         source_ids = [
             self.tagger._message_source_id(
                 event, msg, idx, getattr(msg, "content", None)
@@ -457,16 +461,16 @@ class MagicContextPlugin(Star):
             clear_pending_tool_names(self.tool_appeal_state_path, set(eligible_tools))
 
     def _build_reduce_guidance(self) -> str:
-        protected = int(self.config.get("protected_tags", 20))
         return (
             "## Magic Context\n\n"
-            "Messages and tool outputs may contain tag markers like §12§.\n"
             "Use `ctx_reduce` to manage context size.\n"
-            "- `drop`: remove old tags entirely, best for tool outputs you already used.\n"
-            f"- Syntax: `3-5`, `1,2,9`, `1-5,8`. Last {protected} tags are protected.\n"
-            "- Prefer dropping old `tool_call` and `tool_result` tags.\n"
+            "- `ctx_reduce`: match an old tool call/result by a short content prefix and remove it deterministically.\n"
+            "- Parameters: `match` is required; optional `kind` = `tool_call` or `tool_result`; optional `tool_name` narrows the target.\n"
+            "- Prefer dropping old `tool_call` and `tool_result` context you already used.\n"
             "- Never drop user messages blindly.\n"
-            "- Before your turn finishes, consider using `ctx_reduce` to drop large tool outputs you no longer need."
+            '- `ctx_compact(mode="lite")`: deterministically clears stale old tool context.\n'
+            '- `ctx_compact(mode="hard")`: stores a historian summary for older context without touching the recent tail.\n'
+            "- Before your turn finishes, consider `ctx_reduce` for stale tool outputs and `ctx_compact` when the session is getting heavy."
         )
 
     def _apply_visible_tag_prefixes(
@@ -515,13 +519,32 @@ class MagicContextPlugin(Star):
                         setattr(part, text_attr, f"§{tag_number}§ {part_text}")
 
     @filter.llm_tool(name="ctx_reduce")
-    async def ctx_reduce(self, event: AstrMessageEvent, drop: str) -> str:
-        """Drop old context tags you no longer need.
+    async def ctx_reduce(
+        self, event: AstrMessageEvent, match: str, kind: str = "", tool_name: str = ""
+    ) -> str:
+        """Drop old tool context you no longer need.
 
         Args:
-            drop(string): Tag ids to drop entirely, like 3-5 or 1,2,9. Prefer old tool_call and tool_result tags. Never drop user messages blindly.
+            match(string): A short prefix from the target tool args or tool result. Use the first 5-12 characters and make it longer if ambiguous.
+            kind(string): Optional. Use tool_call or tool_result to narrow the target.
+            tool_name(string): Optional exact tool name filter.
         """
-        return await queue_ctx_reduce(self, event.unified_msg_origin, drop)
+        return (
+            "Runtime `ctx_reduce` is provided by the structured dataclass tool. "
+            "Use fields: `match`, optional `kind`, optional `tool_name`."
+        )
+
+    @filter.llm_tool(name="ctx_compact")
+    async def ctx_compact(self, event: AstrMessageEvent, mode: str) -> str:
+        """Compact session context.
+
+        Args:
+            mode(string): lite for deterministic old tool cleanup, or hard for historian summary compaction.
+        """
+        return (
+            "Runtime `ctx_compact` is provided by the structured dataclass tool. "
+            "Use field: `mode` = `lite` or `hard`."
+        )
 
     @filter.llm_tool(name="parallel_tool_use")
     async def parallel_tool_use_placeholder(

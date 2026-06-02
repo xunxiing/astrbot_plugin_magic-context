@@ -2,6 +2,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from hooks.heuristic_cleanup import HeuristicCleanup
 from hooks.idle_compaction import IdleCompactionService
 from hooks.injection import Injector
 
@@ -221,6 +222,65 @@ async def test_idle_lite_only_drops_old_tool_tags_without_historian():
         session_id == "ses-lite" and payload.get("last_compaction_mode") == "lite"
         for session_id, payload in db.updated
     )
+
+
+@pytest.mark.asyncio
+async def test_heuristic_cleanup_removes_dropped_tool_calls_from_assistant():
+    class LocalDB:
+        async def get_tags_by_session(self, session_id):
+            return [
+                {
+                    "tag_number": 1,
+                    "message_id": "call-1",
+                    "type": "tool_call",
+                    "status": "dropped",
+                    "tool_owner_message_id": "msg:assistant-1",
+                },
+                {
+                    "tag_number": 2,
+                    "message_id": "tool:call-1",
+                    "type": "tool_result",
+                    "status": "dropped",
+                    "tool_owner_message_id": "msg:assistant-1",
+                    "drop_mode": "full",
+                },
+            ]
+
+        async def get_max_tag_number(self, session_id):
+            return 2
+
+        async def get_pending_ops(self, session_id):
+            return []
+
+        async def clear_pending_ops(self, session_id):
+            return None
+
+        async def update_tag_status(self, session_id, tag_number, status):
+            return None
+
+        async def update_tag_drop_mode(self, session_id, tag_number, drop_mode):
+            return None
+
+    tool_call = SimpleNamespace(
+        id="call-1",
+        function=SimpleNamespace(name="web_search", arguments='{"q":"astrbot"}'),
+    )
+    assistant_msg = SimpleNamespace(
+        role="assistant", id="assistant-1", content="", tool_calls=[tool_call]
+    )
+    tool_msg = SimpleNamespace(
+        role="tool", content="big tool result", tool_call_id="call-1"
+    )
+    run_context = SimpleNamespace(messages=[assistant_msg, tool_msg])
+    event = SimpleNamespace(unified_msg_origin="ses-1")
+
+    cleanup = HeuristicCleanup(LocalDB(), {"drop_tool_structure": True})
+
+    await cleanup.cleanup_phase(event, run_context)
+
+    assert assistant_msg.tool_calls is None
+    assert assistant_msg.content == "[dropped]"
+    assert tool_msg.content == "[dropped]"
 
 
 @pytest.mark.asyncio
