@@ -89,9 +89,9 @@ function renderOverview() {
   elements.latestEvent.textContent = `最近压缩：${formatTime(data.latest_event_at)}`;
 
   const pressureText =
-    data.avg_ratio >= 0.85 ? "今天压力偏高，Fallback 风险明显" :
-    data.avg_ratio >= 0.4 ? "今天进入过摘要压缩观察区" :
-    "今天大多停留在 Lite 观察区";
+    data.avg_ratio >= 1 ? "今天多次顶到目标上下文线，适合让 LLM 自己决定是否清理" :
+    data.avg_ratio >= 0.4 ? "今天多次进入 Lite 观察区，后台空闲压缩可能会介入" :
+    "今天大多停留在低压区，缓存稳定性较好";
   elements.curveSummary.textContent = `${data.date_label} · ${pressureText}`;
 }
 
@@ -114,8 +114,9 @@ function buildGridLines() {
       })
       .join("");
 
-  const liteY = 20 + (height - 40) * (1 - 0.4);
-  const hardY = 20 + (height - 40) * (1 - 0.85);
+  const liteThreshold = Number(state.config?.lite_compaction_ratio_threshold ?? 0.4);
+  const liteY = 20 + (height - 40) * (1 - Math.max(0, Math.min(1, liteThreshold)));
+  const hardY = 20;
   elements.chartThresholds.innerHTML = [
     `<line class="lite-line" x1="24" y1="${liteY}" x2="${width - 24}" y2="${liteY}"></line>`,
     `<line class="hard-line" x1="24" y1="${hardY}" x2="${width - 24}" y2="${hardY}"></line>`,

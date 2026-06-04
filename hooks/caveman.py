@@ -9,7 +9,7 @@ Preservation guarantees (all levels):
  - URLs (http://, https://)
  - File paths
  - Commit hashes (7-40 hex chars)
- - Compartment markers (§N§, msg_*, ses_*, toolu_*)
+ - Stable internal ids (msg_*, ses_*, toolu_*)
  - Lines starting with "U: " (user quotes)
 """
 
@@ -39,7 +39,6 @@ _PRESERVATION_PATTERNS: list[re.Pattern] = [
     re.compile(r"```[\s\S]*?```"),
     re.compile(r"`[^`\n]+`"),
     re.compile(r"https?://\S+"),
-    re.compile(r"§\d+§"),
     re.compile(r"\b(?:msg|ses|toolu)_[A-Za-z0-9]+"),
     re.compile(r"(?:\.{1,2}/)?(?:[\w.-]+/)+[\w.-]+\.\w{1,6}"),
     re.compile(r"(?<![a-z0-9])[0-9a-f]{7,40}(?![a-z0-9])", re.IGNORECASE),

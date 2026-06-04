@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +17,10 @@ from .hooks.injection import Injector
 from .hooks.llm_reduce_tool import CtxCompactTool, CtxReduceTool
 from .hooks.parallel_tool import ParallelToolUseTool
 from .hooks.postprocess import PostProcessor
+from .hooks.request_guidance import (
+    build_reduce_guidance,
+    should_offer_request_compaction,
+)
 from .hooks.strip import strip_cleared_reasoning, strip_inline_thinking
 from .hooks.tag import Tagger
 from .hooks.tool_appeal import (
@@ -104,7 +107,6 @@ DEFAULT_CONFIG = {
     "lite_compaction_ratio_threshold": 0.4,
     "historian_keep_recent_lite": 12,
     "historian_keep_recent_hard": 6,
-    "request_fallback_ratio_threshold": 0.85,
     "auto_drop_tool_age": 20,
     "protected_tags": 20,
     "drop_tool_structure": False,
@@ -285,12 +287,12 @@ class MagicContextPlugin(Star):
     # ── Phase 4: Historian ─────────────────────────────────────────
     @filter.on_llm_request(priority=50)
     async def phase_4_historian(self, event: AstrMessageEvent, req: ProviderRequest):
-        self._ensure_magic_context_guidance(req)
-        await self._inject_pending_tool_appeal(event, req)
         session_id = event.unified_msg_origin
         context_limit = self._resolve_request_context_limit(event)
         input_tokens = self._estimate_context_tokens(req.contexts)
         ratio = input_tokens / max(context_limit, 1)
+        self._ensure_magic_context_guidance(req, input_tokens, context_limit)
+        await self._inject_pending_tool_appeal(event, req)
         await self.db.get_or_create_session_meta(session_id)
         await self.db.update_session_meta(
             session_id,
@@ -304,59 +306,6 @@ class MagicContextPlugin(Star):
             context_limit=context_limit,
             ratio=ratio,
         )
-
-        existing_compartments = await self.db.get_compartments(session_id)
-        if existing_compartments:
-            return
-
-        if len(req.contexts) < self.config.get("historian_min_messages", 20):
-            return
-
-        if ratio < float(self.config.get("request_fallback_ratio_threshold", 0.85)):
-            return
-
-        try:
-            result = await asyncio.wait_for(
-                self.historian.run_compartment_agent(session_id, req.contexts),
-                timeout=self.config.get("historian_timeout_ms", 30000) / 1000,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"[MagicContext] Historian timed out for {session_id}")
-            return
-        except Exception as e:
-            logger.error(f"[MagicContext] Historian error: {e}")
-            return
-
-        if result and result.get("compartments"):
-            mode = (
-                "lite"
-                if ratio
-                < float(self.config.get("lite_compaction_ratio_threshold", 0.4))
-                else "hard"
-            )
-            last_end = max(comp["end_message"] for comp in result["compartments"])
-            await self.db.update_session_meta(
-                session_id,
-                last_compaction_at=self._now_ms(),
-                last_compaction_mode=mode,
-                last_compaction_input_tokens=input_tokens,
-                last_compaction_ratio=ratio,
-                last_compaction_source_end_message=last_end,
-                last_compaction_context_limit=context_limit,
-            )
-            await self.db.record_compaction_event(
-                session_id,
-                mode=mode,
-                source="request_fallback",
-                input_tokens=input_tokens,
-                saved_tokens=0,
-                context_limit=context_limit,
-                ratio=ratio,
-            )
-            logger.info(
-                f"[MagicContext] Request fallback historian: {len(result['compartments'])} compartments, "
-                f"{len(result.get('facts', []))} facts, ratio={ratio:.3f}"
-            )
 
     # ── Phase 5: Injection ─────────────────────────────────────────
     @filter.on_llm_request(priority=40)
@@ -412,8 +361,15 @@ class MagicContextPlugin(Star):
 
         return int(time.time() * 1000)
 
-    def _ensure_magic_context_guidance(self, req: ProviderRequest) -> None:
-        guidance = self._build_reduce_guidance()
+    def _ensure_magic_context_guidance(
+        self,
+        req: ProviderRequest,
+        input_tokens: int | None = None,
+        context_limit: int | None = None,
+    ) -> None:
+        guidance = build_reduce_guidance(input_tokens, context_limit)
+        if not guidance:
+            return
         contexts = list(getattr(req, "contexts", []) or [])
         if not contexts:
             req.contexts = [{"role": "system", "content": guidance}]
@@ -460,18 +416,19 @@ class MagicContextPlugin(Star):
         if inject_appeal_only_into_request(req, appeal_text):
             clear_pending_tool_names(self.tool_appeal_state_path, set(eligible_tools))
 
-    def _build_reduce_guidance(self) -> str:
-        return (
-            "## Magic Context\n\n"
-            "Use `ctx_reduce` to manage context size.\n"
-            "- `ctx_reduce`: match an old tool call/result by a short content prefix and remove it deterministically.\n"
-            "- Parameters: `match` is required; optional `kind` = `tool_call` or `tool_result`; optional `tool_name` narrows the target.\n"
-            "- Prefer dropping old `tool_call` and `tool_result` context you already used.\n"
-            "- Never drop user messages blindly.\n"
-            '- `ctx_compact(mode="lite")`: deterministically clears stale old tool context.\n'
-            '- `ctx_compact(mode="hard")`: stores a historian summary for older context without touching the recent tail.\n'
-            "- Before your turn finishes, consider `ctx_reduce` for stale tool outputs and `ctx_compact` when the session is getting heavy."
-        )
+    def _build_reduce_guidance(
+        self,
+        input_tokens: int | None = None,
+        context_limit: int | None = None,
+    ) -> str:
+        return build_reduce_guidance(input_tokens, context_limit)
+
+    def _should_offer_request_compaction(
+        self,
+        input_tokens: int | None,
+        context_limit: int | None,
+    ) -> bool:
+        return should_offer_request_compaction(input_tokens, context_limit)
 
     def _apply_visible_tag_prefixes(
         self, event: AstrMessageEvent, messages: list, all_tags: list[dict]

@@ -11,7 +11,6 @@
     "lite_compaction_ratio_threshold": {"type": "float", "default": 0.4},
     "historian_keep_recent_lite": {"type": "int", "default": 12},
     "historian_keep_recent_hard": {"type": "int", "default": 6},
-    "request_fallback_ratio_threshold": {"type": "float", "default": 0.85},
     "caveman_level": {"type": "string", "default": "full", "options": ["none", "lite", "full", "ultra"]},
     "auto_drop_tool_age": {"type": "int", "default": 20},
     "historian_chunk_tokens": {"type": "int", "default": 4000},

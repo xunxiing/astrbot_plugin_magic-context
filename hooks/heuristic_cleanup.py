@@ -60,10 +60,6 @@ class HeuristicCleanup:
         """Hook handler for @filter.on_agent_begin()"""
         session_id = event.unified_msg_origin
         tags = await self.db.get_tags_by_session(session_id)
-        max_tag = await self.db.get_max_tag_number(session_id)
-
-        tool_age_cutoff = max_tag - self.config["auto_drop_tool_age"]
-        protected_cutoff = max_tag - self.config.get("protected_tags", 20)
 
         messages = run_context.messages
 
@@ -74,26 +70,7 @@ class HeuristicCleanup:
         truncated_tools = 0
         pending_drops = 0
 
-        # Phase A: Auto-drop old tool tags
-        for tag in self._active_tags(tags):
-            tag_num = tag.get("tag_number", 0)
-            tag_type = tag.get("type", "")
-            tag_status = tag.get("status", "")
-            if tag_status != "active":
-                continue
-            if tag_num > protected_cutoff:
-                continue
-            if tag_num <= tool_age_cutoff and tag_type in ("tool_call", "tool_result"):
-                await self.db.update_tag_status(session_id, tag_num, "dropped")
-                drop_mode = (
-                    "full" if self.config["drop_tool_structure"] else "truncated"
-                )
-                await self.db.update_tag_drop_mode(session_id, tag_num, drop_mode)
-                tag["status"] = "dropped"
-                tag["drop_mode"] = drop_mode
-                dropped_tools += 1
-
-        # Phase B: Strip system injections from old messages
+        # Phase A: Strip system injections from old messages
         for msg in messages:
             content = getattr(msg, "content", None)
             if not isinstance(content, str):
@@ -110,47 +87,14 @@ class HeuristicCleanup:
                 msg.content = stripped
                 dropped_injections += 1
 
-        # Phase C: Tool deduplication
         tag_index = self._build_tag_index(tags)
-        tags_by_number = {tag.get("tag_number"): tag for tag in tags}
-        fingerprints = self._build_tool_fingerprints(messages, tag_index, event)
-        if fingerprints:
-            fp_groups: dict[str, list[tuple[int, dict]]] = {}
-            for fp_key, entries in fingerprints.items():
-                for entry in entries:
-                    msg_idx, tag = entry
-                    tag_num = tag.get("tag_number", 0)
-                    if tag_num > protected_cutoff:
-                        continue
-                    fp_groups.setdefault(fp_key, []).append((tag_num, entry))
 
-            for fp_key, group in fp_groups.items():
-                if len(group) <= 1:
-                    continue
-                group.sort(key=lambda x: x[0])
-                for i in range(len(group) - 1):
-                    tag_num = group[i][0]
-                    await self.db.update_tag_drop_mode(
-                        session_id,
-                        tag_num,
-                        "full" if self.config["drop_tool_structure"] else "truncated",
-                    )
-                    await self.db.update_tag_status(session_id, tag_num, "dropped")
-                    tag = tags_by_number.get(tag_num)
-                    if tag is None:
-                        continue
-                    tag["status"] = "dropped"
-                    tag["drop_mode"] = (
-                        "full" if self.config["drop_tool_structure"] else "truncated"
-                    )
-                    dedup_count += 1
-
-        # Phase D: Apply dropped/truncated tag state to live messages.
+        # Phase B: Apply already-decided dropped/truncated tag state to live messages.
         apply_result = self._apply_tag_drops(messages, tags, tag_index, event)
         applied_drops = apply_result["dropped"]
         truncated_tools = apply_result["truncated"]
 
-        # Phase E: Remove empty/sentinel messages after applying drops.
+        # Phase C: Remove empty/sentinel messages after applying drops.
         to_remove = []
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
@@ -180,7 +124,7 @@ class HeuristicCleanup:
         for idx in to_remove:
             del messages[idx]
 
-        # Phase F: Apply pending ops and replay them immediately.
+        # Phase D: Apply pending ops and replay them immediately.
         pending_ops = await self.db.get_pending_ops(session_id)
         if pending_ops:
             tags_by_num = {t.get("tag_number", 0): t for t in tags}
@@ -310,6 +254,7 @@ class HeuristicCleanup:
     ) -> dict[str, int]:
         dropped = 0
         truncated = 0
+        removed_tool_call_ids: set[str] = set()
         dropped_tags = [
             tag
             for tag in tags
@@ -329,11 +274,20 @@ class HeuristicCleanup:
             )
 
             if role == "assistant":
-                dropped += self._apply_tool_call_drops(msg, source_id, dropped_tags)
+                dropped_delta, call_ids = self._apply_tool_call_drops(
+                    msg, source_id, dropped_tags
+                )
+                dropped += dropped_delta
+                removed_tool_call_ids.update(call_ids)
 
             if role == "tool":
                 tool_call_id = getattr(msg, "tool_call_id", None)
                 if not tool_call_id:
+                    continue
+                if tool_call_id in removed_tool_call_ids:
+                    msg.tool_call_id = None
+                    if self._drop_message_content(msg, {}):
+                        dropped += 1
                     continue
                 owner_id = self._nearest_tool_owner(messages, idx, tool_call_id, event)
                 tag = tag_index.get(("tool_result", f"tool:{tool_call_id}", owner_id))
@@ -346,6 +300,7 @@ class HeuristicCleanup:
                     if self._truncate_message_content(msg, tag):
                         truncated += 1
                 else:
+                    msg.tool_call_id = None
                     if self._drop_message_content(msg, tag):
                         dropped += 1
                 continue
@@ -374,13 +329,14 @@ class HeuristicCleanup:
         msg,
         owner_id: str,
         dropped_tags: list[dict],
-    ) -> int:
+    ) -> tuple[int, set[str]]:
         tool_calls = getattr(msg, "tool_calls", None)
         if not isinstance(tool_calls, list) or not tool_calls:
-            return 0
+            return 0, set()
 
         remaining = []
         removed = 0
+        removed_call_ids: set[str] = set()
         for tc in tool_calls:
             call_id = self._tool_call_id(tc)
             matched = False
@@ -396,11 +352,12 @@ class HeuristicCleanup:
                 break
             if matched:
                 removed += 1
+                removed_call_ids.add(call_id)
                 continue
             remaining.append(tc)
 
         if removed <= 0:
-            return 0
+            return 0, set()
 
         msg.tool_calls = remaining or None
         content = getattr(msg, "content", None)
@@ -408,7 +365,7 @@ class HeuristicCleanup:
             content is None or (isinstance(content, str) and not content.strip())
         ):
             msg.content = "[dropped]"
-        return removed
+        return removed, removed_call_ids
 
     def _drop_message_content(self, msg, tag: dict) -> bool:
         content = getattr(msg, "content", None)
